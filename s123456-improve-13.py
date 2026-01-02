@@ -13,7 +13,7 @@ from Problem import Problem
 
 
 def solution(p: Problem):
-    # 1. Init Matrici (Lazy Loading) - Eseguito una volta sola
+    # 1. Init Matrici (Lazy Loading) - Eseguito una volta   sola
     if not hasattr(p, '_matrix_init_done'):
         _precompute_matrices(p)
 
