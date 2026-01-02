@@ -69,27 +69,28 @@ def solve_genetic(p: Problem):
     """
     GA Memetico per istanze trattabili.
     """
-    cities = [n for n in range(len(p._nodes_list)) if n != 0 and p._gold_cache[n] > 0]
+    cities = [n for n in range(len(p._nodes_list)) if n != 0]
     num_cities = len(cities)
     
-    # --- Tuning Parametri ---
+
+    # --- Tuning Parametri MIGLIORATI ---
     if num_cities < 50:
-        population_size = 150
-        generations = 150
-        elite_size = 20
-        mutation_rate = 0.30 
+        population_size = 250       # +50
+        generations = 400           # +200
+        elite_size = 25             # +5
+        mutation_rate = 0.35
     elif num_cities < 150:
-        population_size = 120 
-        generations = 300
-        elite_size = 15
-        mutation_rate = 0.45 
+        population_size = 180       # +30
+        generations = 400           # +150
+        elite_size = 20             # +5
+        mutation_rate = 0.45
     elif num_cities <= 300:
-        population_size = 90
-        generations = 600
-        elite_size = 10
+        population_size = 150       # +30
+        generations = 500           # +200
+        elite_size = 15             # +3
         mutation_rate = 0.60
     else:
-        # Fallback (non dovrebbe accadere grazie al dispatcher)
+        # Fallback
         population_size = 60
         generations = 800
         elite_size = 5
@@ -101,7 +102,6 @@ def solve_genetic(p: Problem):
     num_greedy = int(population_size * 0.4) 
     for _ in range(num_greedy):
         start_node = random.choice(cities)
-        # Usa la funzione unificata _nearest_neighbor_from
         population.append(_nearest_neighbor_from(p, cities, start_node))
 
     while len(population) < population_size:
@@ -167,49 +167,63 @@ def solve_genetic(p: Problem):
 
 def solve_ils(p: Problem):
     """
-    Greedy + ILS per istanze grandi.
+    ILS Geometrico + Clustering:
+    1. Ottimizza la geometria (distanza pura) velocemente.
+    2. Taglia il tour in cluster ottimali per gestire il peso.
     """
-    cities = [n for n in range(len(p._nodes_list)) if n != 0 and p._gold_cache[n] > 0]
+    cities = [n for n in range(len(p._nodes_list)) if n != 0]
+    if not cities: return [(0,0)]
     
-    if not cities:
-        return [(0,0)]
-        
-    n_cities = len(cities)
+    # 1. Inizializzazione Multi-Start (Geometry-Aware)
+    best_tour = []
+    best_dist = float('inf')
+    
+    # Proviamo 3 partenze: Random e Farthest (spesso buona per geometria)
+    starts = [random.choice(cities) for _ in range(2)]
 
-    # 1. Multi-start Greedy
-    solutions = []
+    # Aggiungi un tentativo deterministico (es. il più lontano dalla base)
+    farthest_city = max(cities, key=lambda c: p._mat_dist[0][c])
+    starts.append(farthest_city)
 
-    # Nearest neighbor da 5 punti diversi
-    num_starts = min(5, n_cities)
-    for _ in range(num_starts):
-        start = random.choice(cities)
-        tour = _nearest_neighbor_from(p, cities, start)
-        solutions.append(tour)
+    for start_node in starts:
+        tour = _nearest_neighbor_from(p, cities, start_node)
+        d = _calc_pure_distance(p, tour)
+        if d < best_dist:
+            best_dist = d
+            best_tour = tour
 
-    # Savings heuristic
-    tour = _savings_simple(p, cities)
-    solutions.append(tour)
+    # 2. ILS Loop (Geometry First)
+    # Riduciamo iterazioni per velocità (60 bastano per convergere geometricamente)
+    max_iter = 60 
+    
+    current_tour = best_tour[:]
+    current_dist = best_dist
+    
+    for iteration in range(max_iter):
+        # A. Local Search (2-Opt Fast con Delta Eval)
+        current_tour, current_dist = _local_search_2opt_fast_dist(p, current_tour, current_dist)
 
-    # Farthest insertion
-    tour = _farthest_insertion_simple(p, cities)
-    solutions.append(tour)
+        # B. Aggiorna Best
+        if current_dist < best_dist:
+            best_dist = current_dist
+            best_tour = current_tour[:]
 
-    # Prendi il migliore greedy
-    best_tour = min(solutions, key=lambda t: _eval_tour_fast(p, t))
+        # C. Perturbazione (Double Bridge)
+        if iteration < max_iter - 1:
+            # Perturbazione adattiva
+            strength = 2 if iteration < max_iter // 2 else 3
+            current_tour = _perturb_double_bridge(best_tour, strength)
+            current_dist = _calc_pure_distance(p, current_tour)
 
-    # 2. ILS: Iterated Local Search
-    iters = 50 if n_cities > 800 else 80
-    best_tour = _iterated_local_search_simple(p, best_tour, max_iter=iters)
-
-    # 3. Check Inversione (Forward vs Backward)
-    path_fw = _build_path_simple_clustering(p, best_tour)
-    path_bw = _build_path_simple_clustering(p, best_tour[::-1])
+    # 3. Post-Processing: Clustering Split
+    # Applichiamo il taglio intelligente al miglior tour geometrico trovato
+    path_fw = _split_tour_with_clustering(p, best_tour)
+    path_bw = _split_tour_with_clustering(p, best_tour[::-1])
     
     cost_fw = _calculate_exact_cost(p, path_fw)
     cost_bw = _calculate_exact_cost(p, path_bw)
     
     return path_fw if cost_fw < cost_bw else path_bw
-
 
 # ==============================================================================
 # STRATEGIA 3: MERGE - HUB & SPOKE (Beta > 1)
@@ -280,15 +294,16 @@ def solve_merge(p: Problem):
 # ==============================================================================
 
 def _precompute_matrices(p: Problem): 
-    nodes = list(p.graph.nodes) # Usa p.graph.nodes invece di p._graph se possibile, ma Problem espone _graph
+    nodes = list(p._graph.nodes)
     n = len(nodes)
     p._nodes_list = nodes
-    p._gold_cache = [p.graph.nodes[i]['gold'] for i in range(n)]
+    p._gold_cache = [p._graph.nodes[i]['gold'] for i in range(n)]
     
     p._mat_dist = [[0.0] * n for _ in range(n)]
     p._mat_beta = [[0.0] * n for _ in range(n)]
     
-    all_paths = dict(nx.all_pairs_dijkstra_path(p.graph, weight='dist'))
+    # Calcolo Dijkstra sul grafo originale
+    all_paths = dict(nx.all_pairs_dijkstra_path(p._graph, weight='dist'))
     
     for u in range(n):
         if u not in all_paths: continue
@@ -296,7 +311,8 @@ def _precompute_matrices(p: Problem):
             d_sum = 0.0
             d_beta_sum = 0.0
             for i in range(len(path) - 1):
-                d = p.graph[path[i]][path[i+1]]['dist']
+                # Accesso diretto a _graph per evitare copie nel loop
+                d = p._graph[path[i]][path[i+1]]['dist']
                 d_sum += d
                 d_beta_sum += d ** p.beta
             p._mat_dist[u][v] = d_sum
@@ -384,71 +400,101 @@ def _farthest_insertion_simple(p, cities):
         remaining.remove(farthest)
     return tour
 
-def _eval_tour_fast(p, tour):
-    if len(tour) == 0: return 0.0
-    cost = 0.0
-    curr = 0
-    weight = 0.0
+def _calc_pure_distance(p, tour):
+    """Calcola la distanza pura totale del tour (senza tornare alla base)"""
+    d = 0.0
+    for i in range(len(tour) - 1):
+        d += p._mat_dist[tour[i]][tour[i+1]]
+    return d
+
+def _local_search_2opt_fast_dist(p, tour, current_dist):
+    """
+    2-Opt velocissimo basato solo sulla DISTANZA.
+    Usa la valutazione delta O(1).
+    """
+    best_tour = tour
+    best_d = current_dist
+    n = len(tour)
+    improved = True
     
-    if p.beta < 0.5: cluster_size = 10
-    elif p.beta < 0.8: cluster_size = 5
-    else: cluster_size = 3
+    # Pre-fetch per velocità
+    mat = p._mat_dist
+    
+    while improved:
+        improved = False
+        for i in range(n - 2):
+            # Risparmia tempo: salta archi troppo lunghi se possibile (pruning leggero)
+            # ma con O(1) non è strettamente necessario.
+            
+            for j in range(i + 2, n):
+                # Nodi coinvolti nello scambio
+                # A-B ... C-D  diventa  A-C ... B-D
+                # i = A, i+1 = B, j = C, j+1 = D (se j è ultimo, D non c'è)
+                
+                A = best_tour[i]
+                B = best_tour[i+1]
+                C = best_tour[j]
+                D = best_tour[j+1] if j + 1 < n else None
+                
+                # Vecchi archi
+                d_old = mat[A][B]
+                if D is not None: d_old += mat[C][D]
+                
+                # Nuovi archi
+                d_new = mat[A][C]
+                if D is not None: d_new += mat[B][D]
+                
+                if d_new < d_old:
+                    delta = d_new - d_old
+                    # Esegui swap
+                    new_segment = best_tour[i+1:j+1][::-1]
+                    best_tour = best_tour[:i+1] + new_segment + best_tour[j+1:]
+                    best_d += delta
+                    improved = True
+                    # First Improvement (più veloce del Best Improvement)
+                    break 
+            if improved: break
+            
+    return best_tour, best_d
+
+def _split_tour_with_clustering(p, tour):
+    """
+    Spezza il tour geometrico in viaggi A/R basati sulla capacità empirica.
+    Migliore del 'Giant Tour' per N grandi.
+    """
+    path = []
+    curr = 0 # Posizione fisica corrente (inizia alla base)
+    
+    # Tuning Cluster Size basato su Beta
+    # Più beta è basso, più possiamo accumulare.
+    if p.beta < 0.3:
+        cluster_size = 15
+    elif p.beta < 0.6: # Caso 0.5 cade qui
+        cluster_size = 10 
+    elif p.beta < 0.9:
+        cluster_size = 6
+    else:
+        cluster_size = 4
 
     for i, city in enumerate(tour):
         gold = p._gold_cache[city]
-        cost += _get_cost_matrix(p, curr, city, weight)
-        weight += gold
-        curr = city
         
+        # Se siamo alla base (inizio nuovo viaggio), non aggiungiamo (0,0) di nuovo
+        if curr == 0 and len(path) > 0 and path[-1] == (0,0):
+             pass 
+
+        path.append((city, gold))
+        curr = city
+
+        # Condizione di scarico:
+        # 1. Raggiunta dimensione cluster
+        # 2. Oppure siamo all'ultima città del tour
         if (i + 1) % cluster_size == 0 or i == len(tour) - 1:
-            cost += _get_cost_matrix(p, curr, 0, weight)
-            curr = 0
-            weight = 0.0
-    return cost
+            path.append((0, 0))
+            curr = 0 # Reset alla base virtualmente
+            
+    return path
 
-def _iterated_local_search_simple(p, tour, max_iter=80):
-    best_tour = tour[:]
-    best_cost = _eval_tour_fast(p, best_tour)
-    current_tour = tour[:]
-
-    for iteration in range(max_iter):
-        current_tour = _local_search_2opt_windowed(p, current_tour)
-        current_cost = _eval_tour_fast(p, current_tour)
-
-        if current_cost < best_cost:
-            best_cost = current_cost
-            best_tour = current_tour[:]
-
-        if iteration < max_iter - 1:
-            strength = 2 if iteration < max_iter // 2 else 3
-            current_tour = _perturb_double_bridge(best_tour, strength)
-
-    return best_tour
-
-def _local_search_2opt_windowed(p, tour):
-    improved = True
-    best_tour = tour[:]
-    best_cost = _eval_tour_fast(p, best_tour)
-    n = len(best_tour)
-    window_size = min(30, n // 2)
-    max_passes = 5
-    passes = 0
-
-    while improved and passes < max_passes:
-        improved = False
-        passes += 1
-        for i in range(n - 1):
-            j_max = min(n, i + window_size)
-            for j in range(i + 2, j_max):
-                new_tour = best_tour[:i] + best_tour[i:j][::-1] + best_tour[j:]
-                new_cost = _eval_tour_fast(p, new_tour)
-                if new_cost < best_cost:
-                    best_tour = new_tour
-                    best_cost = new_cost
-                    improved = True
-                    break
-            if improved: break
-    return best_tour
 
 def _perturb_double_bridge(tour, strength=2):
     n = len(tour)
@@ -746,6 +792,60 @@ def _get_cost_trip_simple(p, d_out, d_in, w):
     cost_out = d_out
     cost_in = d_in + ((p.alpha * w) ** p.beta) * d_in
     return cost_out + cost_in
+
+
+
+#########################################
+#########################################
+
+
+
+def check_solution_cost(p: Problem, solution_path):
+    """
+    Verifica indipendente del costo totale.
+    Non usa le matrici pre-calcolate, ma simula il movimento fisico
+    sul grafo originale usando nx.shortest_path e la formula della traccia.
+    """
+    total_cost = 0.0
+    current_w = 0.0
+    curr_node = 0  # Si parte sempre dalla base
+    
+    # Estrazione parametri per leggibilità
+    alpha = p.alpha
+    beta = p.beta
+
+    for next_node, collected_gold in solution_path:
+        # 1. Calcola il percorso fisico reale (nodi intermedi)
+        # Il ladro percorre sempre la strada più breve (distanza) tra due città
+        try:
+            physical_path = nx.shortest_path(p._graph, source=curr_node, target=next_node, weight='dist')
+        except nx.NetworkXNoPath:
+            print(f"!!! ERRORE CRITICO: Non esiste strada tra {curr_node} e {next_node}")
+            return float('inf')
+
+        # 2. Somma il costo di ogni singolo arco fisico
+        for i in range(len(physical_path) - 1):
+            u = physical_path[i]
+            v = physical_path[i+1]
+            
+            # Dati dell'arco dal grafo originale
+            d = p._graph[u][v]['dist']
+            
+            # FORMULA DELLA TRACCIA: Costo = d + (alpha * d * W)^beta
+            # Nota: W è il peso che stai trasportando SU QUESTO ARCO (prima di caricare il nuovo oro)
+            fatigue = (alpha * d * current_w) ** beta
+            
+            total_cost += d + fatigue
+
+        # 3. Aggiorna lo stato per la prossima iterazione
+        curr_node = next_node
+        
+        if curr_node == 0:
+            current_w = 0.0 # Scarico completo alla base
+        else:
+            current_w += collected_gold # Carico oro
+            
+    return total_cost
 
 
 # ==============================================================================
