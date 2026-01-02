@@ -24,14 +24,18 @@ def solution(p: Problem):
 
     
     if p.beta <= 1.0:
-        # --- CASO ACCUMULO (Beta basso: conviene fare percorsi lunghi) ---
-        if n_cities < 500:
-            # Per istanze gestibili, il tuo Algoritmo Memetico è ottimo
+        # Conta quante città hanno effettivamente oro
+        # (Escludiamo la base 0 e le città vuote)
+        active_cities_count = len([c for c in range(n_cities) if c != 0 and p._gold_cache[c] > 0])
+        
+        # SOGLIA CRITICA: 
+        # Fino a ~300 città attive, il GA in Python regge bene e dà qualità alta.
+        # Sopra le 300, diventa lento e conviene l'approccio Greedy+ILS.
+        if active_cities_count <= 300:
             path = _solve_memetic_algorithm(p)
         else:
-            # N > 500
-            # Usiamo un approccio Greedy filtrato (solo città con oro) + Ottimizzazione Direzione
             path = _solve_accumulation_simple(p)
+
             
     # ------------------------------------------------------------------------------------
     ## TODO : con B=1 hai il caso speciale che devi usare 
@@ -550,30 +554,40 @@ def _solve_memetic_algorithm(p: Problem, population_size=180, generations=250, e
 
     num_cities = len(cities)
     
-    # --- AUTO-TUNING DEI PARAMETRI #1 ---
+    # --- AUTO-TUNING DEI PARAMETRI (RICALIBRATO 0-300) ---
     
-    if num_cities < 100:
-        # MAPPE PICCOLE: 
+    if num_cities < 50:
+        # MAPPE PICCOLISSIME: Possiamo esagerare, è istantaneo.
         population_size = 150
-        generations = 200
-        elite_size = 15
-        mutation_rate = 0.40 # Basta poca mutazione, si risolve facile
+        generations = 150
+        elite_size = 20
+        mutation_rate = 0.30 
 
-    elif num_cities < 400:
-        # MAPPE MEDIE: Bilanciato
+    elif num_cities < 150:
+        # MAPPE STANDARD: Configurazione classica bilanciata.
         population_size = 120 
-        generations = 250
-        elite_size = 12
-        mutation_rate = 0.50 # Più mutazione per non stagnare
+        generations = 300     # Aumentiamo le generazioni per convergere meglio
+        elite_size = 15
+        mutation_rate = 0.45 
 
+    elif num_cities <= 300:
+        # FASCIA CRITICA (150-300): Qui il GA inizia a soffrire in Python.
+        # Strategia: Riduciamo la popolazione per fare le generazioni più velocemente,
+        # ma aumentiamo il numero di generazioni e la mutazione.
+        population_size = 90  # Meno individui = Generazioni più veloci
+        generations = 600     # Molte più generazioni per scendere in profondità
+        elite_size = 10       # Elite stretta per non portarsi dietro zavorra
+        mutation_rate = 0.60  # Mutazione alta per evitare minimi locali con pop piccola
 
-    else: # N >= 500 # TODO - affina un po qui ..
-        # MAPPE GRANDI: Dobbiamo essere veloci
-        population_size = 100 # Riduciamo popolazione perché valutare costa molto
-        generations = 300     # Più generazioni perché lo spazio di ricerca è enorme -- tropp 300
-        elite_size = 10       # Èlite stretta
-        mutation_rate = 0.60  # Mutazione altissima: serve esplorare molto 
-    
+    else:
+        # FALLBACK DI SICUREZZA (Se il dispatcher decidesse di mandare qui un N>300)
+        # Modalità "Sopravvivenza veloce"
+        population_size = 60
+        generations = 800
+        elite_size = 5
+        mutation_rate = 0.70
+
+    # --- DA QUI IN GIÙ IL CODICE RIMANE UGUALE ---
 
 
   
