@@ -3,7 +3,7 @@ import random
 import time
 import networkx as nx
 import numpy as np
-from Problem import Probem 
+from Problem import Problem 
 
 
 # ==============================================================================
@@ -12,30 +12,32 @@ from Problem import Probem
 
 
 def solution(p: Problem):
-    # 1. Init Matrici (Lazy Loading) - Eseguito una volta sola
+    # 1. Init Matrici
     if not hasattr(p, '_matrix_init_done'):
         _precompute_matrices(p)
 
     n_cities = len(p._nodes_list)
     
-    # 2. Selezione Strategia
+    # --- MODIFICA STRATEGICA PER N PICCOLI ---
+    # Se le città sono pochissime (< 20), il Genetico è imbattibile e velocissimo.
+    # Usiamolo sempre, ignorando Beta.
+    active_cities_count = len([c for c in range(n_cities) if c != 0]) # Semplificato
+    
+    if active_cities_count < 20:
+        return solve_genetic(p)
+    # -----------------------------------------
+
+    # 2. Selezione Strategia Standard
     if p.beta > 1.0:
-        # --- CASO SCARICO (Beta Alto) ---
         path = solve_merge(p)
     elif p.beta == 1.0:
-        # --- CASO SPECIALE BETA=1 (Lineare) ---
         path = solve_beta_one(p)
     else:
-        # --- CASO ACCUMULO (Beta Basso) ---
-        active_cities_count = len([c for c in range(n_cities) if c != 0 and p._gold_cache[c] > 0])
-        
-        # SOGLIA CRITICA: 300 città
         if active_cities_count <= 300:
-            # Per istanze piccole/medie: Algoritmo Genetico (Massima Qualità)
             path = solve_genetic(p)
         else:
-            # Per istanze enormi: ILS con DP Splitting (Qualità + Velocità)
             path = solve_ils(p)
+            
 
     # 3. Safety Check & Baseline
     my_cost = _calculate_exact_cost(p, path)
@@ -822,17 +824,26 @@ def _mutation_inversion(sol):
 
 def _local_search_refine(p, solution, quick=False):
     best_sol = solution[:]
-    best_cost = _eval_chrom_enhanced(p, best_sol)  # UPDATED: usa enhanced
+    best_cost = _eval_chrom_enhanced(p, best_sol)
     n = len(best_sol)
     
     if quick:
         num_iter_2opt = 20
-        num_iter_insert = 15
+        # FIX: Non possiamo chiedere 15 se n < 15
+        num_iter_insert = min(n, 15)
         max_loops = 1 
         neighbors_to_check = 6
     else:
+        # 2-Opt è un loop, non un sample, quindi max(50...) va bene anche se n è piccolo
+        # (farà semplicemente più giri sugli stessi archi)
         num_iter_2opt = max(50, min(int(n * 0.5), 300))
-        num_iter_insert = max(50, min(int(n * 0.4), 300))
+        
+        # Insert richiede random.sample, che CRASHA se k > population.
+        # Calcoliamo il target desiderato
+        target_insert = max(50, min(int(n * 0.4), 300))
+        # E lo limitiamo a n
+        num_iter_insert = min(n, target_insert)
+        
         max_loops = 3 if n > 500 else 4
         neighbors_to_check = 20
 
@@ -845,11 +856,12 @@ def _local_search_refine(p, solution, quick=False):
         
         # 2-Opt
         for _ in range(num_iter_2opt): 
+            if n < 3: break # Sicurezza per N piccolissimi
             i, j = sorted(random.sample(range(n), 2))
             if j - i < 2: continue
             if quick and (j - i) > (n / 4): continue
             new_sol = best_sol[:i] + best_sol[i:j+1][::-1] + best_sol[j+1:]
-            new_cost = _eval_chrom_enhanced(p, new_sol)  # UPDATED
+            new_cost = _eval_chrom_enhanced(p, new_sol)
             if new_cost < best_cost:
                 best_sol = new_sol
                 best_cost = new_cost
@@ -860,40 +872,47 @@ def _local_search_refine(p, solution, quick=False):
         if improved: continue
 
         # Guided Insert
-        target_indices = random.sample(range(n), num_iter_insert)
-        for idx in target_indices:
-            city = best_sol[idx]
-            temp_sol = best_sol[:idx] + best_sol[idx+1:]
-            
-            neighbors = p._neighbors[city]
-            candidate_positions = set()
-            for neighbor in neighbors[:neighbors_to_check]:
-                try:
-                    pos_neighbor = temp_sol.index(neighbor)
-                    candidate_positions.add(pos_neighbor) 
-                    candidate_positions.add(pos_neighbor + 1)
-                except ValueError: continue
+        if num_iter_insert > 0:
+            target_indices = random.sample(range(n), num_iter_insert)
+            for idx in target_indices:
+                city = best_sol[idx]
+                temp_sol = best_sol[:idx] + best_sol[idx+1:]
+                
+                neighbors = p._neighbors[city]
+                candidate_positions = set()
+                for neighbor in neighbors[:neighbors_to_check]:
+                    try:
+                        pos_neighbor = temp_sol.index(neighbor)
+                        candidate_positions.add(pos_neighbor) 
+                        candidate_positions.add(pos_neighbor + 1)
+                    except ValueError: continue
 
-            candidate_positions.update(random.sample(range(len(temp_sol)+1), 1 if quick else 2))
-            
-            found_better = False
-            for pos in candidate_positions:
-                if pos > len(temp_sol): pos = len(temp_sol)
-                cand = temp_sol[:pos] + [city] + temp_sol[pos:]
-                c = _eval_chrom_enhanced(p, cand)  # UPDATED
-                if c < best_cost:
-                    best_sol = cand
-                    best_cost = c
-                    improved = True
-                    found_better = True
-                    break 
-            
-            if found_better:
-                if quick: break
-                else: break
+                # FIX: Anche qui random.sample non deve superare la lunghezza
+                # candidate_positions può essere vuoto o piccolo
+                n_temp = len(temp_sol) + 1
+                k_rnd = 1 if quick else 2
+                k_rnd = min(k_rnd, n_temp)
+                
+                if k_rnd > 0:
+                    candidate_positions.update(random.sample(range(n_temp), k_rnd))
+                
+                found_better = False
+                for pos in candidate_positions:
+                    if pos > len(temp_sol): pos = len(temp_sol)
+                    cand = temp_sol[:pos] + [city] + temp_sol[pos:]
+                    c = _eval_chrom_enhanced(p, cand)
+                    if c < best_cost:
+                        best_sol = cand
+                        best_cost = c
+                        improved = True
+                        found_better = True
+                        break 
+                
+                if found_better:
+                    if quick: break
+                    else: break
             
     return best_sol
-
 
 def _refine_solution_final(p, sol):
     best_s = sol[:]
@@ -1000,6 +1019,7 @@ def check_solution_cost(p: Problem, solution_path):
 # MAIN TEST
 # ==============================================================================
 
+'''
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
@@ -1043,3 +1063,80 @@ if __name__ == "__main__":
                     print(f"{n:<4} | {a:<4.1f} | {b:<4.1f} | {d:<4.1f} | {base:<12.2f} | {cost:<12.2f} | {delta_str:<12} | {perc_str:<8} | {elapsed_time:<8.4f}")
     
     print("-" * 130)
+'''
+
+if __name__ == "__main__":
+    import csv
+    import os
+    
+    # Configurazione
+    logging.getLogger().setLevel(logging.INFO)
+    filename = 'benchmark_results.csv'
+    
+    print("-" * 155)
+    print(f"--- SFIDA COMPLETA (N=10 -> 1000) ---")
+    print("-" * 155)
+    # Header aggiornato: RIMOSSA colonna Solver
+    print(f"{'N':<4} | {'Alp':<3} | {'Bet':<3} | {'Den':<3} | {'Seed':<5} || {'BASELINE':<12} | {'MIO Costo':<12} | {'RIVALE':<12} || {'Gap %':<7} | {'Stato':<12} | {'Time':<6}")
+    print("-" * 155)
+
+    if not os.path.exists(filename):
+        print(f"ERRORE: Il file '{filename}' non è stato trovato nella cartella corrente.")
+        print("Assicurati di averlo scaricato o creato con i dati del benchmark.")
+    else:
+        try:
+            with open(filename, mode='r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                
+                # Pulizia dei nomi delle colonne
+                reader.fieldnames = [name.strip() for name in reader.fieldnames]
+
+                for row in reader:
+                    try:
+                        n = int(row['n'])
+                        alpha = float(row['alpha'])
+                        beta = float(row['beta'])
+                        density = float(row['density'])
+                        seed = int(row['seed'])
+                        target_cost = float(row['best_cost'])
+                        # best_solver non serve più leggerlo per la stampa
+                    except (ValueError, KeyError) as e:
+                        continue
+
+                    start_time = time.time()
+                    
+                    # 1. Creazione Istanza Esatta
+                    p = Problem(num_cities=n, density=density, alpha=alpha, beta=beta, seed=seed)
+                    
+                    # 2. Calcolo Baseline
+                    base_cost = p.baseline()
+                    
+                    # 3. Tua Soluzione
+                    try:
+                        sol = solution(p)
+                        my_cost = check_solution_cost(p, sol)
+                    except Exception as e:
+                        print(f"ERRORE CRITICO su N={n} Seed={seed}: {e}")
+                        my_cost = float('inf')
+
+                    elapsed_time = time.time() - start_time
+                    
+                    # 4. Confronto
+                    gap = my_cost - target_cost
+                    gap_perc = (gap / target_cost) * 100 if target_cost > 0 else 0.0
+                    
+                    # 5. Stato
+                    if my_cost <= target_cost + 0.001:
+                        status = "\033[92mWIN (BOTH)\033[0m"
+                    elif my_cost < base_cost:
+                        status = "\033[93mBEAT BASE\033[0m" 
+                    else:
+                        status = "\033[91mLOSE\033[0m"
+
+                    # Formattazione Output SENZA Solver
+                    print(f"{n:<4} | {alpha:<3.1f} | {beta:<3.1f} | {density:<3.1f} | {seed:<5} || {base_cost:<12.2f} | {my_cost:<12.2f} | {target_cost:<12.2f} || {gap_perc:<+6.2f}% | {status:<12} | {elapsed_time:<6.2f}")
+                    
+        except Exception as e:
+            print(f"Errore durante la lettura del file CSV: {e}")
+
+    print("-" * 155)
