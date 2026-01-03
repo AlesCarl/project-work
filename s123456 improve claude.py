@@ -17,32 +17,38 @@ def solution(p: Problem):
         _precompute_matrices(p)
 
     n_cities = len(p._nodes_list)
+    active_cities_count = len([c for c in range(n_cities) if c != 0])
     
-    # --- MODIFICA STRATEGICA PER N PICCOLI ---
-    # Se le città sono pochissime (< 20), il Genetico è imbattibile e velocissimo.
-    # Usiamolo sempre, ignorando Beta.
-    active_cities_count = len([c for c in range(n_cities) if c != 0]) # Semplificato
-    
-    if active_cities_count < 20:
-        return solve_genetic(p)
-    # -----------------------------------------
+    path = [] # Variabile per salvare il percorso scelto
 
-    # 2. Selezione Strategia Standard
-    if p.beta > 1.0:
+    # --- 2. Selezione Strategia ---
+    
+    # N PICCOLI (< 20): Genetico SEMPRE (è l'ottimo globale)
+    if active_cities_count < 20:
+        path = solve_genetic(p)
+
+    # SCARICO (Beta > 1.0): Merge (gestisce il peso meglio)
+    elif p.beta > 1.0:
         path = solve_merge(p)
+        
+    # LINEARE (Beta = 1.0): Strategia dedicata
     elif p.beta == 1.0:
         path = solve_beta_one(p)
+        
+    # ACCUMULO (Beta < 1.0)
     else:
         if active_cities_count <= 300:
             path = solve_genetic(p)
         else:
             path = solve_ils(p)
-            
 
     # 3. Safety Check & Baseline
+    # Calcoliamo il costo reale della nostra soluzione
     my_cost = _calculate_exact_cost(p, path)
     
-    # Ricostruiamo la Baseline (Viaggi singoli A/R solo verso città con oro)
+    # Ricostruiamo la Baseline (Viaggi singolari A/R)
+    # Nota: La baseline è spesso ottima per Beta > 1 se non si fa merge,
+    # quindi è un "salvagente" fondamentale.
     base_path = []
     target_cities = [c for c in range(n_cities) if c != 0 and p._gold_cache[c] > 0]
     
@@ -51,7 +57,7 @@ def solution(p: Problem):
 
     base_cost = _calculate_exact_cost(p, base_path)
 
-    # Se la nostra soluzione è peggiore della baseline, torniamo la baseline
+    # Se la nostra soluzione è peggiore della baseline, buttiamo tutto e usiamo la baseline. ##TODO -- occhio 
     if my_cost > base_cost:
         return base_path
 
@@ -829,19 +835,15 @@ def _local_search_refine(p, solution, quick=False):
     
     if quick:
         num_iter_2opt = 20
-        # FIX: Non possiamo chiedere 15 se n < 15
+        # FIX SICUREZZA: Mai chiedere più di n
         num_iter_insert = min(n, 15)
         max_loops = 1 
         neighbors_to_check = 6
     else:
-        # 2-Opt è un loop, non un sample, quindi max(50...) va bene anche se n è piccolo
-        # (farà semplicemente più giri sugli stessi archi)
         num_iter_2opt = max(50, min(int(n * 0.5), 300))
         
-        # Insert richiede random.sample, che CRASHA se k > population.
-        # Calcoliamo il target desiderato
+        # FIX SICUREZZA: Calcola target e limita a n
         target_insert = max(50, min(int(n * 0.4), 300))
-        # E lo limitiamo a n
         num_iter_insert = min(n, target_insert)
         
         max_loops = 3 if n > 500 else 4
@@ -856,7 +858,7 @@ def _local_search_refine(p, solution, quick=False):
         
         # 2-Opt
         for _ in range(num_iter_2opt): 
-            if n < 3: break # Sicurezza per N piccolissimi
+            if n < 3: break # Sicurezza N piccolissimi
             i, j = sorted(random.sample(range(n), 2))
             if j - i < 2: continue
             if quick and (j - i) > (n / 4): continue
@@ -887,8 +889,7 @@ def _local_search_refine(p, solution, quick=False):
                         candidate_positions.add(pos_neighbor + 1)
                     except ValueError: continue
 
-                # FIX: Anche qui random.sample non deve superare la lunghezza
-                # candidate_positions può essere vuoto o piccolo
+                # FIX SICUREZZA: random.sample non deve superare la lunghezza
                 n_temp = len(temp_sol) + 1
                 k_rnd = 1 if quick else 2
                 k_rnd = min(k_rnd, n_temp)
@@ -930,11 +931,11 @@ def _refine_solution_final(p, sol):
             limit_j = min(n, i + window)
             for j in range(i + 2, limit_j):
                 new_s = best_s[:i] + best_s[i:j+1][::-1] + best_s[j+1:]
-                c = _eval_chrom_enhanced(p, new_s)  # UPDATED
+                c = _eval_chrom_enhanced(p, new_s)  # UPDATED 
                 if c < best_c:
                     best_c = c
-                    best_s = new_s
-                    improved = True
+                    best_s = new_s 
+                    improved = True 
                     break 
             if improved: break
     return best_s
@@ -953,15 +954,31 @@ def _optimal_splits_for_city(p, city_id):
 
     best_splits = 1
     best_cost = float('inf')
-    max_splits = min(15, int(total_gold) + 1)
+    
+    # FIX: Se Beta > 1, dobbiamo poter splittare tantissimo (es. fino a 1kg per viaggio)
+    if p.beta > 1.0:
+        # Prova fino a quando il carico è circa 1 (o max 500 split per performance)
+        max_splits = min(500, int(total_gold) + 1)
+    else:
+        # Per Beta < 1 non serve splittare molto (anzi...)
+        max_splits = min(15, int(total_gold) + 1)
 
-    for k in range(1, max_splits + 1):
+    # Ottimizzazione: Passo variabile per non testare 500 volte se inutile
+    step = 1
+    if max_splits > 50: step = 5 
+    
+    # Includi sempre 1 e max_splits
+    range_splits = list(range(1, max_splits + 1, step))
+    if max_splits not in range_splits: range_splits.append(max_splits)
+
+    for k in range_splits:
         g = total_gold / k
         trip_cost = _get_cost_trip_simple(p, dist, dist, g) 
         total_k_cost = k * trip_cost
         if total_k_cost < best_cost:
             best_cost = total_k_cost
             best_splits = k
+            
     return best_splits, total_gold / best_splits
 
 
@@ -971,7 +988,7 @@ def _get_cost_trip_simple(p, d_out, d_in, w):
     return cost_out + cost_in
 
 
-# ==============================================================================
+# ============================================================================== 
 # VALIDATION FUNCTION
 # ==============================================================================
 
@@ -980,7 +997,7 @@ def check_solution_cost(p: Problem, solution_path):
     """
     Verifica indipendente del costo totale.
     Non usa le matrici pre-calcolate, ma simula il movimento fisico
-    sul grafo originale usando nx.shortest_path e la formula della traccia.
+    sul grafo originale usando nx.shortest_path e la formula della traccia .
     """
     total_cost = 0.0
     current_w = 0.0
@@ -1068,75 +1085,104 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     import csv
     import os
+    import time
     
     # Configurazione
     logging.getLogger().setLevel(logging.INFO)
-    filename = 'benchmark_results.csv'
+    benchmark_file = 'benchmark_results.csv'
+    output_file = 'my_results_n1000.csv' # File dedicato per N=10
     
     print("-" * 155)
-    print(f"--- SFIDA COMPLETA (N=10 -> 1000) ---")
+    print(f"--- SFIDA  (SOLO N=1000) ---")
     print("-" * 155)
-    # Header aggiornato: RIMOSSA colonna Solver
     print(f"{'N':<4} | {'Alp':<3} | {'Bet':<3} | {'Den':<3} | {'Seed':<5} || {'BASELINE':<12} | {'MIO Costo':<12} | {'RIVALE':<12} || {'Gap %':<7} | {'Stato':<12} | {'Time':<6}")
     print("-" * 155)
 
-    if not os.path.exists(filename):
-        print(f"ERRORE: Il file '{filename}' non è stato trovato nella cartella corrente.")
+    if not os.path.exists(benchmark_file):
+        print(f"ERRORE: Il file '{benchmark_file}' non è stato trovato nella cartella corrente.")
         print("Assicurati di averlo scaricato o creato con i dati del benchmark.")
     else:
         try:
-            with open(filename, mode='r', newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                
-                # Pulizia dei nomi delle colonne
-                reader.fieldnames = [name.strip() for name in reader.fieldnames]
+            # Apriamo il file di output in scrittura
+            with open(output_file, mode='w', newline='', encoding='utf-8') as f_out:
+                fieldnames = ['n', 'alpha', 'beta', 'density', 'seed', 'base_cost', 'my_cost', 'rival_cost', 'gap_perc', 'status', 'time']
+                writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+                writer.writeheader()
 
-                for row in reader:
-                    try:
-                        n = int(row['n'])
-                        alpha = float(row['alpha'])
-                        beta = float(row['beta'])
-                        density = float(row['density'])
-                        seed = int(row['seed'])
-                        target_cost = float(row['best_cost'])
-                        # best_solver non serve più leggerlo per la stampa
-                    except (ValueError, KeyError) as e:
-                        continue
+                with open(benchmark_file, mode='r', newline='', encoding='utf-8') as f_in:
+                    reader = csv.DictReader(f_in)
+                    reader.fieldnames = [name.strip() for name in reader.fieldnames]
 
-                    start_time = time.time()
-                    
-                    # 1. Creazione Istanza Esatta
-                    p = Problem(num_cities=n, density=density, alpha=alpha, beta=beta, seed=seed)
-                    
-                    # 2. Calcolo Baseline
-                    base_cost = p.baseline()
-                    
-                    # 3. Tua Soluzione
-                    try:
-                        sol = solution(p)
-                        my_cost = check_solution_cost(p, sol)
-                    except Exception as e:
-                        print(f"ERRORE CRITICO su N={n} Seed={seed}: {e}")
-                        my_cost = float('inf')
+                    for row in reader:
+                        try:
+                            n = int(row['n'])
+                            
+                            # --- FILTRO ATTIVO: SOLO N=10 ---
+                            if n != 1000: continue 
+                            # --------------------------------
 
-                    elapsed_time = time.time() - start_time
-                    
-                    # 4. Confronto
-                    gap = my_cost - target_cost
-                    gap_perc = (gap / target_cost) * 100 if target_cost > 0 else 0.0
-                    
-                    # 5. Stato
-                    if my_cost <= target_cost + 0.001:
-                        status = "\033[92mWIN (BOTH)\033[0m"
-                    elif my_cost < base_cost:
-                        status = "\033[93mBEAT BASE\033[0m" 
-                    else:
-                        status = "\033[91mLOSE\033[0m"
+                            alpha = float(row['alpha'])
+                            beta = float(row['beta'])
+                            density = float(row['density'])
+                            seed = int(row['seed'])
+                            target_cost = float(row['best_cost'])
+                        except (ValueError, KeyError):
+                            continue
 
-                    # Formattazione Output SENZA Solver
-                    print(f"{n:<4} | {alpha:<3.1f} | {beta:<3.1f} | {density:<3.1f} | {seed:<5} || {base_cost:<12.2f} | {my_cost:<12.2f} | {target_cost:<12.2f} || {gap_perc:<+6.2f}% | {status:<12} | {elapsed_time:<6.2f}")
-                    
+                        start_time = time.time()
+                        
+                        # 1. Creazione Istanza Esatta
+                        p = Problem(num_cities=n, density=density, alpha=alpha, beta=beta, seed=seed)
+                        
+                        # 2. Calcolo Baseline
+                        base_cost = p.baseline()
+                        
+                        # 3. Tua Soluzione
+                        try:
+                            sol = solution(p)
+                            my_cost = check_solution_cost(p, sol)
+                        except Exception as e:
+                            print(f"ERRORE CRITICO su N={n} Seed={seed}: {e}")
+                            my_cost = float('inf')
+
+                        elapsed_time = time.time() - start_time
+                        
+                        # 4. Confronto
+                        gap = my_cost - target_cost
+                        gap_perc = (gap / target_cost) * 100 if target_cost > 0 else 0.0
+                        
+                        # 5. Stato
+                        status_str = "LOSE"
+                        color_status = "\033[91mLOSE\033[0m"
+                        
+                        if my_cost <= target_cost + 0.001:
+                            status_str = "WIN (BOTH)"
+                            color_status = "\033[92mWIN (BOTH)\033[0m"
+                        elif my_cost < base_cost:
+                            status_str = "BEAT BASE"
+                            color_status = "\033[93mBEAT BASE\033[0m" 
+
+                        # 6. Stampa a video
+                        print(f"{n:<4} | {alpha:<3.1f} | {beta:<3.1f} | {density:<3.1f} | {seed:<5} || {base_cost:<12.2f} | {my_cost:<12.2f} | {target_cost:<12.2f} || {gap_perc:<+6.2f}% | {color_status:<12} | {elapsed_time:<6.2f}")
+                        
+                        # 7. Salvataggio su CSV
+                        writer.writerow({
+                            'n': n,
+                            'alpha': alpha,
+                            'beta': beta,
+                            'density': density,
+                            'seed': seed,
+                            'base_cost': f"{base_cost:.2f}",
+                            'my_cost': f"{my_cost:.2f}",
+                            'rival_cost': f"{target_cost:.2f}",
+                            'gap_perc': f"{gap_perc:.2f}",
+                            'status': status_str,
+                            'time': f"{elapsed_time:.4f}"
+                        })
+                        f_out.flush()
+
         except Exception as e:
-            print(f"Errore durante la lettura del file CSV: {e}")
+            print(f"Errore durante l'esecuzione: {e}")
 
     print("-" * 155)
+    print(f"Risultati salvati in: {output_file}")
