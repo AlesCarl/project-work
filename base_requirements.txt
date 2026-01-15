@@ -1,0 +1,6 @@
+icecream
+numpy
+networkx
+matplotlib
+numba
+icecream
