@@ -3,4 +3,3 @@ numpy
 networkx
 matplotlib
 numba
-icecream
