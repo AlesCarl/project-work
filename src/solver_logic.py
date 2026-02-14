@@ -270,19 +270,19 @@ def solve_genetic(p: Problem):
     num_greedy = int(population_size * 0.30)
     for _ in range(num_greedy):
         start_node = random.choice(cities)
-        population.append(_nearest_neighbor_from(p, cities, start_node))
+        population.append(greedy_heuristic(p, cities, start_node))
     
     # b) Savings Heuristic (20%)
     num_savings = int(population_size * 0.20)
     for _ in range(num_savings):
-        tour = _savings_simple(p, cities)
+        tour = _savings_heuristic(p, cities)
         if random.random() < 0.5: random.shuffle(tour)
         population.append(tour)
     
     # c) Farthest Insertion (10%)
     num_farthest = int(population_size * 0.10)
     for _ in range(num_farthest):
-        population.append(_farthest_insertion_simple(p, cities))
+        population.append(_farthest_insertion_heuristic(p, cities))
     
     # d) Random (40%)
     while len(population) < population_size:
@@ -927,7 +927,7 @@ def _split_tour_optimal_dp(p, tour):
 ### ------------------------------------------------------------------------------
 
 
-def _nearest_neighbor_from(p, cities, start):
+def greedy_heuristic(p, cities, start):
     """Generates a tour using Greedy Nearest Neighbor heuristic."""
     unvisited = set(cities)
     unvisited.remove(start)
@@ -942,7 +942,7 @@ def _nearest_neighbor_from(p, cities, start):
     return tour
 
 
-def _savings_simple(p, cities):
+def _savings_heuristic(p, cities):
     """Generates a tour using Clarke-Wright Savings heuristic."""
     if len(cities) <= 1: return cities[:]
     sorted_cities = sorted(cities, key=lambda c: p._mat_dist[0][c])
@@ -976,7 +976,7 @@ def _savings_simple(p, cities):
     return tour
 
 
-def _farthest_insertion_simple(p, cities):
+def _farthest_insertion_heuristic(p, cities):
     """Generates a tour using Farthest Insertion heuristic."""
     if len(cities) <= 1: return cities[:]
     tour = [max(cities, key=lambda c: p._mat_dist[0][c])]
